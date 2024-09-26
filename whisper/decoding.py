@@ -76,6 +76,26 @@ def detect_language(
 
     return language_tokens, language_probs
 
+#############################################
+"""
+Custom decoding result class to store data for multiple hypotheses
+
+Store relevant data for the decoding result
+"""
+
+@dataclass(frozen=True)
+class CustomDecodingResult:
+    """All hypotheses from beam search"""
+    audio_features: Tensor
+    language: str
+    language_probs: Optional[Dict[str, float]] = None
+    tokens: List[List[int]] = field(default_factory=list) # List of lists where each sublist contains the token IDs of a hypotheses
+    texts: List[str] = field(default_factory=list) # List of strings where each element represents a decoded hypotheses 
+    avg_logprob: float = np.nan # use just the best hypothesis for this value
+    no_speech_prob: float = np.nan
+    temperature: float = np.nan
+    compression_ratio: float = np.nan # use just the best hypothesis for this value
+##############################################
 
 @dataclass(frozen=True)
 class DecodingOptions:
@@ -185,6 +205,46 @@ class SequenceRanker:
         return the indices of the samples in each group to select as the final result
         """
         raise NotImplementedError
+
+#########################################################################
+"""
+Compute scores for all hypotheses. Implements the rank method from parent class
+"""
+
+class CustomReturnAllSamplesRanker(SequenceRanker):
+    """
+    Return list of values, where a value is the likelihood for a hypothesis.
+    """
+    def __init__(self, length_penalty: Optional[float]):
+        self.length_penalty = length_penalty
+
+    # Return the scores for all sequences 
+    def rank(self, tokens: List[List[Tensor]], sum_logprobs: List[List[float]]):
+        # Compute the score for each hypotheses
+        # params-> logprobs: sum_logprobs i.e the joint probability of the seq and thus the
+        # model's confidence in the seq it generated
+        def scores(logprobs, lengths):
+            result = []
+            for logprob, length in zip(logprobs, lengths):
+                if self.length_penalty is None:
+                    penalty = length
+                else:
+                    # from the Google NMT paper
+                    penalty = ((5 + length) / 6) ** self.length_penalty
+                # Compute the score as follows if there is a penalty
+                result.append(logprob / penalty)
+            return result
+
+        # get the sequence with the highest score
+        
+        # Get the length of each token sequence t [[len for token seq1],[len for token seq2],...]
+        lengths = [[len(t) for t in s] for s in tokens]
+        # Iterate over each group of (logprob, lengths). Call the scores function and 
+        # output a list of scores that correspond to the hypotheses
+        return [(scores(p, l)) for p, l in zip(sum_logprobs, lengths)]
+
+#########################################################################
+
 
 
 class MaximumLikelihoodRanker(SequenceRanker):
@@ -540,7 +600,14 @@ class DecodingTask:
         self.inference = PyTorchInference(model, len(self.initial_tokens))
 
         # sequence ranker: implements how to rank a group of sampled sequences
-        self.sequence_ranker = MaximumLikelihoodRanker(options.length_penalty)
+        ##########################################################################
+        # Original code i.e. original sequence ranker that takes selects the sample with the highest log probabilities
+        # self.sequence_ranker = MaximumLikelihoodRanker(options.length_penalty)
+
+        # Helps to retain all generated hypotheses with their scores
+        # Works with the CustomDecodingResult: stores the multiple hypotheses
+        self.sequence_ranker =  CustomReturnAllSamplesRanker(options.length_penalty)
+        ############################################################################
 
         # decoder: implements how to select the next tokens, given the autoregressive distribution
         if options.beam_size is not None:
@@ -751,6 +818,10 @@ class DecodingTask:
             for s in tokens
         ]
 
+        ################################################################
+
+        """
+        # Original Code
         # select the top-ranked sample in each group
         selected = self.sequence_ranker.rank(tokens, sum_logprobs)
         tokens: List[List[int]] = [t[i].tolist() for i, t in zip(selected, tokens)]
@@ -771,7 +842,28 @@ class DecodingTask:
         )
         if len(set(map(len, fields))) != 1:
             raise RuntimeError(f"inconsistent result lengths: {list(map(len, fields))}")
+        """
 
+        # New Code
+        # rerank the hypotheses by their likelihood from most likely to least likely
+
+        # Compute the score for each hypotheses
+        probabilities = self.sequence_ranker.rank(tokens, sum_logprobs)
+        # Sort the hypotheses based on their scores in descending order: Most probable to least probable
+        tokens_ordered = [x for _, x in sorted(zip(probabilities[0], tokens[0]), reverse=True)]
+        # Data type conversions
+        tokens: List[List[int]] = [t.tolist() for t in tokens_ordered] 
+        texts: List[str] = [tokenizer.decode(t).strip() for t in tokens]
+        
+        # order sum_logprobs of the hypotheses from most likely to least likely
+        sum_logprobs: List[float] = [x for _, x in sorted(zip(probabilities[0], sum_logprobs[0]), reverse=True)]
+        avg_logprobs: List[float] = [lp / (len(tok_seq) + 1) for tok_seq, lp in zip(tokens, sum_logprobs)]
+        ##############################################################################
+
+
+        ################################
+        """
+        Original Code
         return [
             DecodingResult(
                 audio_features=features,
@@ -787,6 +879,22 @@ class DecodingTask:
                 *fields
             )
         ]
+        """
+        # New Code
+        # We now have a list of lists to hold multiple hypotheses (different data structures)
+        # Therefore we only need one CustomDecodingResult
+        decoding_result = CustomDecodingResult(
+                audio_features=audio_features,
+                language=languages,
+                tokens=tokens,
+                texts=texts,
+                avg_logprob=avg_logprobs[0],
+                no_speech_prob=no_speech_probs[0],
+                temperature=self.options.temperature,
+                compression_ratio=compression_ratio(texts[0]))
+
+        return [decoding_result]
+        ################################
 
 
 @torch.no_grad()
