@@ -118,6 +118,10 @@ def transcribe(
     A dictionary containing the resulting text ("text") and segment-level details ("segments"), and
     the spoken language ("language"), which is detected when `decode_options["language"]` is None.
     """
+
+    """
+    Data type setup 
+    """
     dtype = torch.float16 if decode_options.get("fp16", True) else torch.float32
     if model.device == torch.device("cpu"):
         if torch.cuda.is_available():
@@ -129,11 +133,19 @@ def transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
+    """
+    Convert audio into log-mel spectrogram, an input format suitable for Whisper
+    content_frames: Number of frames in the log-mel spectrogram that contain actual audio
+    content_duration: Total duration of actual audio content
+    """
     # Pad 30-seconds of silence to the input audio, for slicing
     mel = log_mel_spectrogram(audio, model.dims.n_mels, padding=N_SAMPLES)
     content_frames = mel.shape[-1] - N_FRAMES
     content_duration = float(content_frames * HOP_LENGTH / SAMPLE_RATE)
 
+    """
+    Detect the language
+    """
     if decode_options.get("language", None) is None:
         if not model.is_multilingual:
             decode_options["language"] = "en"
@@ -150,6 +162,9 @@ def transcribe(
                     f"Detected language: {LANGUAGES[decode_options['language']].title()}"
                 )
 
+    """
+    Initialise the language, model task and tokenizer
+    """
     language: str = decode_options["language"]
     task: str = decode_options.get("task", "transcribe")
     tokenizer = get_tokenizer(
@@ -159,6 +174,17 @@ def transcribe(
         task=task,
     )
 
+    """
+    clip_timestamps input by user is a Comma-separated list start,end,start,end,... timestamps (in seconds) of clips to process
+    [start transcribe time, end transcribe time, start transcribe time, end transcribe time]
+
+    seek_clips, the end result is a list of clips to transcribe in the format
+    [(start frame index,end frame index),(start frame index,end frame index)]
+
+    if no clip_timestamps is given,
+    seek_clips results in
+    [(0, content_frames)] i.e. [(0, number of frames that actually contain audio)]
+    """
     if isinstance(clip_timestamps, str):
         clip_timestamps = [
             float(ts) for ts in (clip_timestamps.split(",") if clip_timestamps else [])
@@ -175,6 +201,29 @@ def transcribe(
     if word_timestamps and task == "translate":
         warnings.warn("Word-level timestamps on translations may not be reliable.")
 
+
+    """
+    Decode an audio segment into text. Returns a DecodingResult type
+
+    Initialise the temperatures to use: Controls the randomness of predictions
+    Low temp: More deterministic. High temp: More randomness
+
+    For each temperature, attempt decoding with each one
+    - Get the decoding options
+    - Decode with model.decode and the options that returns DecodingResult
+    - Evaluate the decoding quality and decide if we should continue on to the next temp
+    
+    Return the decoding result
+    - CustomDecodingResult(
+                audio_features=audio_features,
+                language=languages,
+                tokens=tokens,
+                texts=texts,
+                avg_logprob=avg_logprobs[0],
+                no_speech_prob=no_speech_probs[0],
+                temperature=self.options.temperature,
+                compression_ratio=compression_ratio(texts[0]))
+    """
     def decode_with_fallback(segment: torch.Tensor) -> DecodingResult:
         temperatures = (
             [temperature] if isinstance(temperature, (int, float)) else temperature
@@ -215,6 +264,28 @@ def transcribe(
 
         return decode_result
 
+    """
+    clip_idx: Keep track of which clip in seek_clips we are in
+
+    Recall seek_clips = [(start frame index,end frame index),(start frame index,end frame index)]
+    or [(0, content_frames)]
+
+    seek: Set the initial frame number of the clip we are processing i.e. start frame index
+
+    input_stride: Determine the number of mel spectogram frames that correspond to 1 output token
+    ratio of number of mel frames to output tokens
+
+    time_precision: Calculate the duration in seconds that corresponds to
+    one output token
+
+    all_tokens: Store all the tokens generated during transcription
+    - accumulate the token IDs corresponding to the transcribed text
+    - used to reconstruct the fully transcribed text at the end
+
+    all_segments: Store the dictionaries representing each segment of the transcription
+
+    prompt_reset_since: 
+    """
     clip_idx = 0
     seek = seek_clips[clip_idx][0]
     input_stride = exact_div(
@@ -227,12 +298,30 @@ def transcribe(
     all_segments = []
     prompt_reset_since = 0
 
+
+    """
+    For prompt engineering
+    """
     if initial_prompt is not None:
         initial_prompt_tokens = tokenizer.encode(" " + initial_prompt.strip())
         all_tokens.extend(initial_prompt_tokens)
     else:
         initial_prompt_tokens = []
 
+
+    """
+    Returns a dictionary representing a transcription segment
+
+    This dictionary segment is added to the all_segments list
+
+    Accepts the 
+    - start, end time of the segment
+    - token IDs for this segment
+    - DecodingResult
+
+    We filter out the tokens that have IDs less than eot i.e. only want transcribed text
+    - tokens greater than tokenizer.eot are special tokens
+    """
     def new_segment(
         *, start: float, end: float, tokens: torch.Tensor, result: DecodingResult
     ):
@@ -250,6 +339,13 @@ def transcribe(
             "no_speech_prob": result.no_speech_prob,
         }
 
+
+
+    """
+    Set up the progress bar to display the transcription progress 
+    The total number of iterations for the progress bar corresponds to 
+    the total number of content frames in the audio
+    """
     # show the progress bar when verbose is False (if True, transcribed text will be printed)
     with tqdm.tqdm(
         total=content_frames, unit="frames", disable=verbose is not False
@@ -259,8 +355,31 @@ def transcribe(
         # A later commit should turn this into a simpler nested loop.
         # for seek_clip_start, seek_clip_end in seek_clips:
         #     while seek < seek_clip_end
+
+        """
+        Set up a loop to iterate over the audio clips in seek_clips
+        recall: seek_clips
+        [(start frame index,end frame index),(start frame index,end frame index)]
+        [(0, content_frames)]
+
+        Recall that clip_idx is the index of the current clip in seek_clips we are in,
+        initialised to 0
+
+        Unpack the start frame and end frame of the current clip
+
+        Adjust the seek position. seek holds the current frame number
+
+        if seek is before the start of the current clip, move it to the clip's start
+
+        if seek is more than the end of the current clip,
+            move to the next clip
+            if the next clip is still in seek clips
+                Get the start frame index of this next clip
+            else it means we have exhausted all clips
+        """
         while clip_idx < len(seek_clips):
             seek_clip_start, seek_clip_end = seek_clips[clip_idx]
+
             if seek < seek_clip_start:
                 seek = seek_clip_start
             if seek >= seek_clip_end:
@@ -268,6 +387,25 @@ def transcribe(
                 if clip_idx < len(seek_clips):
                     seek = seek_clips[clip_idx][0]
                 continue
+
+
+            """
+            time_offset: Calculate the start time of the current segment using seek, the current frame index
+
+            window_end_time: Calculate the end time of the current processing window
+
+            segment_size: Determine the actual number of frames to process in the curr segment
+
+            mel_segment: Extract the portion of the mel-spectrogram corresponding to the curr segment
+            - make sure it has the correct size
+
+            segment_duration: Calculate the duration of the curr segment
+
+            window_end_time is the theoretical end time of the processing window,
+            using N_FRAMES from the current seek position
+
+            segment duration is the actual duration
+            """
             time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
             window_end_time = float((seek + N_FRAMES) * HOP_LENGTH / SAMPLE_RATE)
             segment_size = min(N_FRAMES, content_frames - seek, seek_clip_end - seek)
@@ -275,10 +413,23 @@ def transcribe(
             segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
             mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
 
+            """
+            Perform decoding on the audio segment (mel segment)
+            """
             decode_options["prompt"] = all_tokens[prompt_reset_since:]
             result: DecodingResult = decode_with_fallback(mel_segment)
             tokens = torch.tensor(result.tokens)
 
+            """
+            First check if we should skip based on the no speech probability and 
+            no speech threshold
+
+            Have a second check on the average log probability of the decoded tokens
+            to see if the model is confident in its output
+
+            If we relly should skip, increment seek by the size of the segment
+            and skip the code below
+            """
             if no_speech_threshold is not None:
                 # no voice activity check
                 should_skip = result.no_speech_prob > no_speech_threshold
@@ -293,9 +444,20 @@ def transcribe(
                     seek += segment_size  # fast-forward to the next segment boundary
                     continue
 
+            """
+            Store the current seek position
+            Initialise a list to store the segments generated in this iteration
+            """
             previous_seek = seek
             current_segments = []
 
+            """
+            Calculate a score to indicate how anomalous a word is
+
+            Determines whether a segment is considered anomalous based on the anomaly scores of its words.
+
+            Finds the next segment in a list of segment dictionaries that contains something in the words key
+            """
             # anomalous words are very long/short/improbable
             def word_anomaly_score(word: dict) -> float:
                 probability = word.get("probability", 0.0)
@@ -320,11 +482,49 @@ def transcribe(
             def next_words_segment(segments: List[dict]) -> Optional[dict]:
                 return next((s for s in segments if s["words"]), None)
 
+
+            """
+            timestamp_tokens: Boolean tensor indicating
+            which tokens in the token tensor are timestamp tokens
+            - Note: .ge is greater than or equal
+
+            single_timestamp_ending: Check if the token sequence ends with 
+            a single timestamp token
+
+            consecutive: Identify the indices in tokens tensor
+            where two timestamp tokens occur consecutively
+            - Add 1 to refer to the second token in each pair of consecutive timestamp tokens
+            
+            consecutive timestamp tokens: 
+            - can indicate silence, pause or non-speech
+            - can signal the end of one speech segment and the beginning of another
+            """
             timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
             single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
 
             consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
             consecutive.add_(1)
+
+
+            """
+            Some tokens are timestamp tokens, used to represent specific points in time in
+            the audio
+
+            Each timestamp token represents a time increment
+
+            When the token sequence generated contains consecutive timestamp tokens
+
+            First create a list of indicies that will be used to segment the token 
+            sequence at positions where the consecutive timestamp tokens occur. Call it
+            slices (slicing the token sequence)
+
+            If the token sequence ends with a single timestamp token, append
+            the length of tokens to slices i.e. last index of the 
+            token sequence
+
+            Initialise the last_slice to be 0: Used as the starting index
+            for slicing the token sequence
+            """
             if len(consecutive) > 0:
                 # if the output contains two consecutive timestamp tokens
                 slices = consecutive.tolist()
@@ -332,6 +532,23 @@ def transcribe(
                     slices.append(len(tokens))
 
                 last_slice = 0
+                """
+                For each slice index,
+                    Extract the tokens between last_slice and current slice
+
+                    start_timestamp_pos: Position of the start timestamp token. 
+                    Integer value indicating how many timestamp steps
+                    away from the beginning of the timestamp token
+
+                    end_timestamp_pos: Position of the end timestamp token. 
+                    Integer value indicating how many timestamp steps
+                    away from the beginning of the timestamp token
+
+                    use the start_timestamp_pos and end_timestamp_pos
+                    to calculate the actual times 
+
+                    We then create a new segment 
+                """
                 for current_slice in slices:
                     sliced_tokens = tokens[last_slice:current_slice]
                     start_timestamp_pos = (
@@ -359,6 +576,9 @@ def transcribe(
                         tokens[last_slice - 1].item() - tokenizer.timestamp_begin
                     )
                     seek += last_timestamp_pos * input_stride
+
+
+
             else:
                 duration = segment_duration
                 timestamps = tokens[timestamp_tokens.nonzero().flatten()]
