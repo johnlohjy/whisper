@@ -492,8 +492,9 @@ def transcribe(
     # Recall: Seek is the frame index of the clip we are processing
     # CODE CHANGE: Maintain a different seek position for each hypotheses
     # Why add this
-    decode_options["beam_size"]
-    seek = [0]*decode_options["beam_size"] # one seek variable for each hypothesis
+    # decode_options["beam_size"]
+    # Check if beam size needs to be passed to decoding also
+    seeks = [0]*decode_options["beam_size"] # one seek variable for each hypothesis
 
 
     """
