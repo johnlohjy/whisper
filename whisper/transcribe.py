@@ -488,9 +488,11 @@ def transcribe(
     """
     # CODE CHANGE: Change result type returned from decoding.py
     # Decode the current segment
-    result: CustomDecodingResult = decode_with_fallback(mel_segment) # calls on a segment (computational requirements)
+    result: DecodingResult = decode_with_fallback(mel_segment) # calls on a segment (computational requirements)
     # Recall: Seek is the frame index of the clip we are processing
     # CODE CHANGE: Maintain a different seek position for each hypotheses
+    # Why add this
+    decode_options["beam_size"]
     seek = [0]*decode_options["beam_size"] # one seek variable for each hypothesis
 
 
