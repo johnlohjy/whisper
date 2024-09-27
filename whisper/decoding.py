@@ -109,7 +109,8 @@ class DecodingOptions:
     temperature: float = 0.0
     sample_len: Optional[int] = None  # maximum number of tokens to sample
     best_of: Optional[int] = None  # number of independent sample trajectories, if t > 0
-    beam_size: Optional[int] = None  # number of beams in beam search, if t == 0
+    # CODE CHANGE: Set beam_size to 10 by default to output N-best transcription instead of None
+    beam_size: Optional[int] = 10  # number of beams in beam search, if t == 0
     patience: Optional[float] = None  # patience in beam search (arxiv:2204.05424)
 
     # "alpha" in Google NMT, or None for length norm, when ranking generations
@@ -601,12 +602,12 @@ class DecodingTask:
 
         # sequence ranker: implements how to rank a group of sampled sequences
         ##########################################################################
-        # Original code i.e. original sequence ranker that takes selects the sample with the highest log probabilities
+        # CODE CHANGE: Original code i.e. original sequence ranker that takes selects the sample with the highest log probabilities
         # self.sequence_ranker = MaximumLikelihoodRanker(options.length_penalty)
 
         # Helps to retain all generated hypotheses with their scores
         # Works with the CustomDecodingResult: stores the multiple hypotheses
-        self.sequence_ranker =  CustomReturnAllSamplesRanker(options.length_penalty)
+        self.sequence_ranker = CustomReturnAllSamplesRanker(options.length_penalty)
         ############################################################################
 
         # decoder: implements how to select the next tokens, given the autoregressive distribution
@@ -821,6 +822,7 @@ class DecodingTask:
         ################################################################
 
         """
+        # CODE CHANGE:
         # Original Code
         # select the top-ranked sample in each group
         selected = self.sequence_ranker.rank(tokens, sum_logprobs)
@@ -850,6 +852,7 @@ class DecodingTask:
         # Compute the score for each hypotheses
         probabilities = self.sequence_ranker.rank(tokens, sum_logprobs)
         # Sort the hypotheses based on their scores in descending order: Most probable to least probable
+        # probabilities and tokens are nested arrays, probability values correspond to their tokens
         tokens_ordered = [x for _, x in sorted(zip(probabilities[0], tokens[0]), reverse=True)]
         # Data type conversions
         tokens: List[List[int]] = [t.tolist() for t in tokens_ordered] 
@@ -863,6 +866,7 @@ class DecodingTask:
 
         ################################
         """
+        CODE CHANGE
         Original Code
         return [
             DecodingResult(
@@ -886,7 +890,7 @@ class DecodingTask:
         decoding_result = CustomDecodingResult(
                 audio_features=audio_features,
                 language=languages,
-                tokens=tokens,
+                tokens=tokens, # List of lists where each sublist contains the token IDs of a hypotheses
                 texts=texts,
                 avg_logprob=avg_logprobs[0],
                 no_speech_prob=no_speech_probs[0],

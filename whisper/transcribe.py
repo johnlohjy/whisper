@@ -17,7 +17,7 @@ from .audio import (
     log_mel_spectrogram,
     pad_or_trim,
 )
-from .decoding import DecodingOptions, DecodingResult
+from .decoding import DecodingOptions, DecodingResult, CustomDecodingResult # CODE CHANGE
 from .timing import add_word_timestamps
 from .tokenizer import LANGUAGES, TO_LANGUAGE_CODE, get_tokenizer
 from .utils import (
@@ -133,6 +133,10 @@ def transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
+
+
+
+
     """
     Convert audio into log-mel spectrogram, an input format suitable for Whisper
     content_frames: Number of frames in the log-mel spectrogram that contain actual audio
@@ -142,6 +146,10 @@ def transcribe(
     mel = log_mel_spectrogram(audio, model.dims.n_mels, padding=N_SAMPLES)
     content_frames = mel.shape[-1] - N_FRAMES
     content_duration = float(content_frames * HOP_LENGTH / SAMPLE_RATE)
+
+
+
+
 
     """
     Detect the language
@@ -162,6 +170,8 @@ def transcribe(
                     f"Detected language: {LANGUAGES[decode_options['language']].title()}"
                 )
 
+
+
     """
     Initialise the language, model task and tokenizer
     """
@@ -174,6 +184,9 @@ def transcribe(
         task=task,
     )
 
+
+
+
     """
     clip_timestamps input by user is a Comma-separated list start,end,start,end,... timestamps (in seconds) of clips to process
     [start transcribe time, end transcribe time, start transcribe time, end transcribe time]
@@ -181,9 +194,14 @@ def transcribe(
     seek_clips, the end result is a list of clips to transcribe in the format
     [(start frame index,end frame index),(start frame index,end frame index)]
 
-    if no clip_timestamps is given,
+    
+
+
+    IF NO clip_timestamps IS GIVEN (PROBABLY OUR CASE),
     seek_clips results in
     [(0, content_frames)] i.e. [(0, number of frames that actually contain audio)]
+
+    so in the while loop below, it only iterates once
     """
     if isinstance(clip_timestamps, str):
         clip_timestamps = [
@@ -200,6 +218,11 @@ def transcribe(
 
     if word_timestamps and task == "translate":
         warnings.warn("Word-level timestamps on translations may not be reliable.")
+
+
+
+
+
 
 
     """
@@ -224,7 +247,7 @@ def transcribe(
                 temperature=self.options.temperature,
                 compression_ratio=compression_ratio(texts[0]))
     """
-    def decode_with_fallback(segment: torch.Tensor) -> DecodingResult:
+    def decode_with_fallback(segment: torch.Tensor) -> CustomDecodingResult: #CODE CHANGE
         temperatures = (
             [temperature] if isinstance(temperature, (int, float)) else temperature
         )
@@ -264,6 +287,10 @@ def transcribe(
 
         return decode_result
 
+
+
+
+
     """
     clip_idx: Keep track of which clip in seek_clips we are in
 
@@ -286,8 +313,9 @@ def transcribe(
 
     prompt_reset_since: 
     """
-    clip_idx = 0
-    seek = seek_clips[clip_idx][0]
+    # clip_idx = 0 # CODE CHANGE: NOT USING MULTIPLE CLIPS
+    # seek = seek_clips[clip_idx][0] # CODE CHANGE: NOT USING MULTIPLE CLIPS
+    seek = 0 # Start from the first frame index which is 0 since we are starting from the very start, no cases where we are starting from the second onwards clip
     input_stride = exact_div(
         N_FRAMES, model.dims.n_audio_ctx
     )  # mel frames per output token: 2
@@ -299,6 +327,9 @@ def transcribe(
     prompt_reset_since = 0
 
 
+
+
+
     """
     For prompt engineering
     """
@@ -307,6 +338,9 @@ def transcribe(
         all_tokens.extend(initial_prompt_tokens)
     else:
         initial_prompt_tokens = []
+
+
+
 
 
     """
@@ -323,7 +357,7 @@ def transcribe(
     - tokens greater than tokenizer.eot are special tokens
     """
     def new_segment(
-        *, start: float, end: float, tokens: torch.Tensor, result: DecodingResult
+        *, start: float, end: float, tokens: torch.Tensor, result: CustomDecodingResult # CODE CHANGE
     ):
         tokens = tokens.tolist()
         text_tokens = [token for token in tokens if token < tokenizer.eot]
@@ -341,95 +375,639 @@ def transcribe(
 
 
 
+
+
     """
     Set up the progress bar to display the transcription progress 
     The total number of iterations for the progress bar corresponds to 
     the total number of content frames in the audio
     """
+
+    
     # show the progress bar when verbose is False (if True, transcribed text will be printed)
-    with tqdm.tqdm(
-        total=content_frames, unit="frames", disable=verbose is not False
-    ) as pbar:
-        last_speech_timestamp = 0.0
-        # NOTE: This loop is obscurely flattened to make the diff readable.
-        # A later commit should turn this into a simpler nested loop.
-        # for seek_clip_start, seek_clip_end in seek_clips:
-        #     while seek < seek_clip_end
+    """
+    CODE CHANGE: Dont need progress bar
+    with tqdm.tqdm(total=content_frames, unit="frames", disable=verbose is not False) as pbar:
+    """ 
+    # CODE CHANGE: Dont need this value because we are not doing word level timestamps
+    # last_speech_timestamp = 0.0
+    # NOTE: This loop is obscurely flattened to make the diff readable.
+    # A later commit should turn this into a simpler nested loop.
+    # for seek_clip_start, seek_clip_end in seek_clips:
+    #     while seek < seek_clip_end
+
+
+
+
+
+    """
+    PROCESSING CLIPS: EACH CLIP OR THE ENTIRE AUDIO IF NO CLIP SPECIFICATION
+
+    Set up a loop to iterate over the audio clips in seek_clips
+    recall: seek_clips
+    [(start frame index,end frame index),(start frame index,end frame index)]
+    [(0, content_frames)]
+
+    Recall that clip_idx is the index of the current clip in seek_clips we are in,
+    initialised to 0
+
+    Unpack the start frame and end frame of the current clip
+
+    Adjust the seek position. seek holds the current frame number
+
+    if seek is before the start of the current clip, move it to the clip's start
+
+    if seek is more than the end of the current clip,
+        move to the next clip
+        if the next clip is still in seek clips
+            Get the start frame index of this next clip
+        else it means we have exhausted all clips
+    """
+
+    """
+    # CODE CHANGE: DONT NEED TO DO A WHILE LOOP BECAUSE WE ARE NOT 
+    # GOING TO SPLIT THE AUDIO INTO CLIPS
+    while clip_idx < len(seek_clips):
+        seek_clip_start, seek_clip_end = seek_clips[clip_idx]
+
+        # Adjust seek 
+        if seek < seek_clip_start:
+            seek = seek_clip_start
+        if seek >= seek_clip_end:
+            clip_idx += 1
+            if clip_idx < len(seek_clips):
+                seek = seek_clips[clip_idx][0]
+            continue
+    """
+
+
+    """
+    INSTANTIATING SEGMENT INFO (SUBSET OF CLIP)
+
+    time_offset: Calculate the start time of the current segment using seek, the current frame index
+
+    window_end_time: Calculate the end time of the current processing window
+
+    segment_size: Determine the actual number of frames to process in the curr segment
+
+    mel_segment: Extract the portion of the mel-spectrogram corresponding to the curr segment
+    - make sure it has the correct size
+
+    segment_duration: Calculate the duration of the curr segment
+
+    window_end_time is the theoretical end time of the processing window,
+    using N_FRAMES (num frames per segment) from the current seek position
+
+    segment duration is the actual duration
+
+    Segments are smaller, fixed-size windows within a clip 
+    Help to process the audio in manageable chunks
+    """
+    time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
+    # CODE CHANGE: Dont need this because we are not doing word timestamps
+    # window_end_time = float((seek + N_FRAMES) * HOP_LENGTH / SAMPLE_RATE)
+    # CODE CHANGE: No longer using seek_clip_end because we are not using multiple clips
+    # segment_size = min(N_FRAMES, content_frames - seek, seek_clip_end - seek)
+    # Let the segment size be determined by N_FRAMES (Desired fixed num frames per segment)
+    # or the remaining number of frames in the audio content, whichever is smaller
+    segment_size = min(N_FRAMES, content_frames - seek)
+    # CODE CHECK: use seek+segment_size as the boundary or seek+N_FRAMES
+    mel_segment = mel[:, seek : seek + segment_size]
+    segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
+    mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
+
+    """
+    Perform decoding on the audio segment (mel segment)
+    """
+    decode_options["prompt"] = all_tokens[prompt_reset_since:]
+    
+    """
+    ORIGINAL CODE
+    result: DecodingResult = decode_with_fallback(mel_segment) # calls on a segment (computational requirements)
+    tokens = torch.tensor(result.tokens)
+    """
+    # CODE CHANGE: Change result type returned from decoding.py
+    # Decode the current segment
+    result: CustomDecodingResult = decode_with_fallback(mel_segment) # calls on a segment (computational requirements)
+    # Recall: Seek is the frame index of the clip we are processing
+    # CODE CHANGE: Maintain a different seek position for each hypotheses
+    seek = [0]*decode_options["beam_size"] # one seek variable for each hypothesis
+
+
+    """
+    First check if we should skip based on the no speech probability and 
+    no speech threshold
+
+    Have a second check on the average log probability of the decoded tokens
+    to see if the model is confident in its output
+
+    If we relly should skip, increment seek by the size of the segment
+    and skip the code below
+    """
+    if no_speech_threshold is not None:
+        # no voice activity check
+        should_skip = result.no_speech_prob > no_speech_threshold
+        if (
+            logprob_threshold is not None
+            and result.avg_logprob > logprob_threshold
+        ):
+            # don't skip if the logprob is high enough, despite the no_speech_prob
+            should_skip = False
+
+        if should_skip:
+            # CODE CHANGE: We are now maintaining a different seek position for each hypothesis
+            # seek += segment_size  # fast-forward to the next segment boundary
+            # CODE_CHANGE: no longer in the while loop, so there is no continuing on to a next clip
+            # continue
+            # Instead, we fast forward to the next segment boundary
+            seeks = [seek + segment_size for seek in seeks]  # fast-forward to the next segment boundary
+
+    """
+    Store the current seek position
+    Initialise a list to store the segments generated in this iteration
+    """
+
+    # CODE CHANGE: No longer using previous seek becauuse not using word timestamps and progress bar
+    # previous_seek = seek
+    # CODE CHANGE: Instantiated in a for loop below - maintain a current segment list
+    # for EACH HYPOTHESES
+    # current_segments = []
+
+    """
+    Calculate a score to indicate how anomalous a word is
+
+    Determines whether a segment is considered anomalous based on the anomaly scores of its words.
+
+    Finds the next segment in a list of segment dictionaries that contains something in the words key
+    """
+    # anomalous words are very long/short/improbable
+
+    """
+    # CODE CHANGE: ONLY USED IN WORD TIME STAMPS
+    def word_anomaly_score(word: dict) -> float:
+        probability = word.get("probability", 0.0)
+        duration = word["end"] - word["start"]
+        score = 0.0
+        if probability < 0.15:
+            score += 1.0
+        if duration < 0.133:
+            score += (0.133 - duration) * 15
+        if duration > 2.0:
+            score += duration - 2.0
+        return score
+
+    def is_segment_anomaly(segment: Optional[dict]) -> bool:
+        if segment is None or not segment["words"]:
+            return False
+        words = [w for w in segment["words"] if w["word"] not in punctuation]
+        words = words[:8]
+        score = sum(word_anomaly_score(w) for w in words)
+        return score >= 3 or score + 0.01 >= len(words)
+
+    def next_words_segment(segments: List[dict]) -> Optional[dict]:
+        return next((s for s in segments if s["words"]), None)
+    """
+
+
+    """
+    # CODE CHANGE
+
+    Initialise 
+    - current_segments_list: Each index will hold the list of segments for a hypothesis
+    - current_tokens_list: Each index will hold the list of tokens for a hypothesis
+    """
+    current_segments_list = [] # value per each hypothesis, where value is a list of segments, where a segment is a dict
+    current_tokens_list = [] # value per each hypothesis, where value is a list
+
+
+    """
+    CODE CHANGE: Instead of processing a single token, we now have multiple token lists/transcriptions.
+    We have calculated a mel segment that can be used for all hypotheses as all the
+    seek positions start from 0 (common seek position)
+    Add a for loop
+    """
+
+    # Loop over all hypotheses, only for the first mel segment as they have a common starting seek position
+    for j in range(len(result.tokens)):
+        """
+        timestamp_tokens: Boolean tensor indicating
+        which tokens in the token tensor are timestamp tokens
+        - Note: .ge is greater than or equal
+
+        single_timestamp_ending: Check if the token sequence ends with 
+        a single timestamp token
+
+        consecutive: Identify the indices in tokens tensor
+        where two timestamp tokens occur consecutively
+        - Add 1 to refer to the second token in each pair of consecutive timestamp tokens
+        
+        consecutive timestamp tokens: 
+        - can indicate silence, pause or non-speech
+        - can signal the end of one speech segment and the beginning of another
+        """
+        # CODE CHANGE
+        # - Add a current_segments to contain the current segments for this hypothesis only
+        # - And extract the relevant hypotheses
+        # Overall segmentation logic remains the same just that hypothesis has replaced token
+        current_segments = []
+        hypothesis = torch.tensor(result.tokens[j])
+
+        # CODE CHANGE: Get the timestamp tokens from the hypotheses
+        # timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
+        # Overall logic remains the same just that hypothesis has replaced token
+        timestamp_tokens: torch.Tensor = hypothesis.ge(tokenizer.timestamp_begin)
+        single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
+
+        consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
+        consecutive.add_(1)
+
 
         """
-        Set up a loop to iterate over the audio clips in seek_clips
-        recall: seek_clips
-        [(start frame index,end frame index),(start frame index,end frame index)]
-        [(0, content_frames)]
+        PROCESSING SEGMENTS WITHIN CLIPS AND ADDING THEM TO 
+        current_segments
 
-        Recall that clip_idx is the index of the current clip in seek_clips we are in,
-        initialised to 0
+        PROCESSING EACH SEGMENT
 
-        Unpack the start frame and end frame of the current clip
 
-        Adjust the seek position. seek holds the current frame number
 
-        if seek is before the start of the current clip, move it to the clip's start
+        Some tokens are timestamp tokens, used to represent specific points in time in
+        the audio
 
-        if seek is more than the end of the current clip,
-            move to the next clip
-            if the next clip is still in seek clips
-                Get the start frame index of this next clip
-            else it means we have exhausted all clips
+        Each timestamp token represents a time increment
+
+        When the token sequence generated contains consecutive timestamp tokens
+
+        First create a list of indicies that will be used to segment the token 
+        sequence at positions where the consecutive timestamp tokens occur. Call it
+        slices (slicing the token sequence)
+
+        If the token sequence ends with a single timestamp token, append
+        the length of tokens to slices i.e. last index of the 
+        token sequence
+
+        Initialise the last_slice to be 0: Used as the starting index
+        for slicing the token sequence
+
+
+        This is the case where there are consecutive timestamp tokens
+        Sub-Segments are created based on the positions of the consecutive timestamps
+        - recall that segments are subsets of clips
+
+        Segment processing code
+        - adds sub segments
+        - differs on consecutive or not
+        - differs on single timestamp ending or not 
         """
-        while clip_idx < len(seek_clips):
-            seek_clip_start, seek_clip_end = seek_clips[clip_idx]
+        if len(consecutive) > 0:
+            # if the output contains two consecutive timestamp tokens
+            slices = consecutive.tolist()
+            if single_timestamp_ending:
+                # CODE CHANGE: Hypothesis has replaced token. The logic remains the same
+                # slices.append(len(tokens))
+                slices.append(len(hypothesis))
 
-            if seek < seek_clip_start:
-                seek = seek_clip_start
-            if seek >= seek_clip_end:
-                clip_idx += 1
-                if clip_idx < len(seek_clips):
-                    seek = seek_clips[clip_idx][0]
-                continue
+            last_slice = 0
+            """
+            For each slice index,
+                Extract the tokens between last_slice and current slice
 
+                start_timestamp_pos: Position of the start timestamp token. 
+                Integer value indicating how many timestamp steps
+                away from the beginning of the timestamp token
+
+                end_timestamp_pos: Position of the end timestamp token. 
+                Integer value indicating how many timestamp steps
+                away from the beginning of the timestamp token
+
+                use the start_timestamp_pos and end_timestamp_pos
+                to calculate the actual times 
+
+                We then create a new segment consisting of the 
+                - start time
+                - end time
+                - tokens in this segment
+                - result
 
             """
-            time_offset: Calculate the start time of the current segment using seek, the current frame index
+            for current_slice in slices:
+                # CODE CHANGE: hypothesis replace tokens
+                # sliced_tokens = tokens[last_slice:current_slice]
+                sliced_tokens = hypothesis[last_slice:current_slice]
+                start_timestamp_pos = (
+                    sliced_tokens[0].item() - tokenizer.timestamp_begin
+                )
+                end_timestamp_pos = (
+                    sliced_tokens[-1].item() - tokenizer.timestamp_begin
+                )
+                current_segments.append(
+                    new_segment(
+                        start=time_offset + start_timestamp_pos * time_precision,
+                        end=time_offset + end_timestamp_pos * time_precision,
+                        tokens=sliced_tokens,
+                        result=result,
+                    )
+                )
+                last_slice = current_slice
 
-            window_end_time: Calculate the end time of the current processing window
-
-            segment_size: Determine the actual number of frames to process in the curr segment
-
-            mel_segment: Extract the portion of the mel-spectrogram corresponding to the curr segment
-            - make sure it has the correct size
-
-            segment_duration: Calculate the duration of the curr segment
-
-            window_end_time is the theoretical end time of the processing window,
-            using N_FRAMES from the current seek position
-
-            segment duration is the actual duration
             """
+            After we have iterated through all the slices,
+
+            if the token sequence ends with a single timestamp token,
+            we can move seek (current frame number of the curr clip) to the next segment
+            else ...
+
+            MOVE SEEK TO ITS NEXT POSITION
+            """
+            if single_timestamp_ending:
+                # single timestamp at the end means no speech after the last timestamp.
+                # CODE CHANGE: We are now maintaining a separate seek position
+                # for each hypothesis. They may have different timestamp tokens
+                # result in different seek increments
+                # seek += segment_size
+                seeks[j]+=segment_size
+            else:
+                # otherwise, ignore the unfinished segment and seek to the last timestamp
+                # CODE CHANGE: Hypothesis replace tokens and seek position
+                """
+                last_timestamp_pos = (
+                    tokens[last_slice - 1].item() - tokenizer.timestamp_begin
+                )
+                seek += last_timestamp_pos * input_stride
+                """
+                last_timestamp_pos = (
+                    hypothesis[last_slice - 1].item() - tokenizer.timestamp_begin
+                )
+                seeks[j] += last_timestamp_pos * input_stride
+
+
+        # Executed when there are no consecutive timestamp tokens generated
+        # by the model during transcription
+        else:
+            # Initialise the duration to be the segment duration
+            # Extract any timestamp tokens present
+            duration = segment_duration
+            # CODE CHANGE: Replace tokens with hypothesis
+            # timestamps = tokens[timestamp_tokens.nonzero().flatten()]
+            timestamps = hypothesis[timestamp_tokens.nonzero().flatten()]
+            """
+            Adjust the segment's end time to match the last timestamp indicated
+            by the model, this represents the end time of the segment
+            """
+            if (
+                len(timestamps) > 0
+                and timestamps[-1].item() != tokenizer.timestamp_begin
+            ):
+                # no consecutive timestamps but it has a timestamp; use the last one.
+                last_timestamp_pos = (
+                    timestamps[-1].item() - tokenizer.timestamp_begin
+                )
+                duration = last_timestamp_pos * time_precision
+            # Append the new segment
+            current_segments.append(
+                new_segment(
+                    start=time_offset,
+                    end=time_offset + duration,
+                    # Code change: replace tokens wth hypothesis
+                    # tokens=tokens,
+                    tokens = hypothesis,
+                    result=result,
+                )
+            )
+            # Update the seek position to go to the next segment
+            # CODE CHANGE: Updated seek position for a hypothesis
+            # seek += segment_size
+            seeks[j]+=segment_size
+
+        """
+        CODE CHANGE: Code addition
+        Add the processed current_segments for a hypothesis to its
+        correct index in the current_segments_list that contains
+        all segments for each hypothesis
+        """
+        try:
+            current_segments_list[j].extend([current_segments])
+        except IndexError:
+            current_segments_list.append([current_segments])
+
+
+
+
+        """
+        Extract word-level timestamps using the cross-attention pattern and dynamic time warping,
+        and include the timestamps for each word in each segment.
+
+        By default it is false
+        """
+
+        """
+        if word_timestamps:
+            add_word_timestamps(
+                segments=current_segments,
+                model=model,
+                tokenizer=tokenizer,
+                mel=mel_segment,
+                num_frames=segment_size,
+                prepend_punctuations=prepend_punctuations,
+                append_punctuations=append_punctuations,
+                last_speech_timestamp=last_speech_timestamp,
+            )
+
+            if not single_timestamp_ending:
+                last_word_end = get_end(current_segments)
+                if last_word_end is not None and last_word_end > time_offset:
+                    seek = round(last_word_end * FRAMES_PER_SECOND)
+
+            # skip silence before possible hallucinations
+            if hallucination_silence_threshold is not None:
+                threshold = hallucination_silence_threshold
+                if not single_timestamp_ending:
+                    last_word_end = get_end(current_segments)
+                    if last_word_end is not None and last_word_end > time_offset:
+                        remaining_duration = window_end_time - last_word_end
+                        if remaining_duration > threshold:
+                            seek = round(last_word_end * FRAMES_PER_SECOND)
+                        else:
+                            seek = previous_seek + segment_size
+
+                # if first segment might be a hallucination, skip leading silence
+                first_segment = next_words_segment(current_segments)
+                if first_segment is not None and is_segment_anomaly(first_segment):
+                    gap = first_segment["start"] - time_offset
+                    if gap > threshold:
+                        seek = previous_seek + round(gap * FRAMES_PER_SECOND)
+                        continue
+
+                # skip silence before any possible hallucination that is surrounded
+                # by silence or more hallucinations
+                hal_last_end = last_speech_timestamp
+                for si in range(len(current_segments)):
+                    segment = current_segments[si]
+                    if not segment["words"]:
+                        continue
+                    if is_segment_anomaly(segment):
+                        next_segment = next_words_segment(
+                            current_segments[si + 1 :]
+                        )
+                        if next_segment is not None:
+                            hal_next_start = next_segment["words"][0]["start"]
+                        else:
+                            hal_next_start = time_offset + segment_duration
+                        silence_before = (
+                            segment["start"] - hal_last_end > threshold
+                            or segment["start"] < threshold
+                            or segment["start"] - time_offset < 2.0
+                        )
+                        silence_after = (
+                            hal_next_start - segment["end"] > threshold
+                            or is_segment_anomaly(next_segment)
+                            or window_end_time - segment["end"] < 2.0
+                        )
+                        if silence_before and silence_after:
+                            seek = round(
+                                max(time_offset + 1, segment["start"])
+                                * FRAMES_PER_SECOND
+                            )
+                            if content_duration - segment["end"] < threshold:
+                                seek = content_frames
+                            current_segments[si:] = []
+                            break
+                    hal_last_end = segment["end"]
+
+            last_word_end = get_end(current_segments)
+            if last_word_end is not None:
+                last_speech_timestamp = last_word_end
+        """
+
+
+        """
+        if verbose:
+            for segment in current_segments:
+                start, end, text = segment["start"], segment["end"], segment["text"]
+                line = f"[{format_timestamp(start)} --> {format_timestamp(end)}] {text}"
+                print(make_safe(line))
+        """
+
+
+
+
+
+        """
+        Add the current clip's segment and token information to
+        ALL_SEGMENTS
+        ALL_TOKENS
+
+
+
+        Clear segments that are instantaneous (start and end time the same)
+
+        Clear segments that have no text
+        """
+        # if a segment is instantaneous or does not contain text, clear it
+        """
+        # CODE Change: current_segments_list now contains all the sub-segments
+        # of the current segment for each hypothesis
+        for i, segment in enumerate(current_segments):
+            if segment["start"] == segment["end"] or segment["text"].strip() == "":
+                segment["text"] = ""
+                segment["tokens"] = []
+                segment["words"] = []
+        """
+        for segments in current_segments_list[j]:
+            for segment in segments:
+                if segment["start"] == segment["end"] or segment["text"].strip() == "":
+                    segment["text"] = ""
+                    segment["tokens"] = []
+                    segment["words"] = []
+
+        """
+        # CODE Change: Code addition. Now that we have populated the current_segments_list for the
+        # FIRST mel segment/segment, and cleaned it,
+        # we can then collect the tokens for each hypothesis from the segment
+        # and place it into current_tokens_list
+        """
+        # populate current_tokens_list for this hypothesis 
+        try:
+            current_tokens_list[j].extend([token for segment in current_segments for token in segment["tokens"]])
+        except IndexError:
+            current_tokens_list.append([token for segment in current_segments for token in segment["tokens"]])
+
+
+    # This code is not used anymore in the new ver
+    """
+    all_segments is a list that contains all segments from all clips
+
+    Add the processed segments from current_segments to all_segments
+    Iterate over current_segments, starting off the enumeration from len(all_segments)
+    to continue the ID from where it left of
+
+    [{"id":1, {segment1} }, {"id":2, {segment2} },]
+
+    Collect ALL segment information into a single list
+    """
+    """
+    all_segments.extend(
+        [
+            {"id": i, **segment}
+            for i, segment in enumerate(
+                current_segments, start=len(all_segments)
+            )
+        ]
+    )
+    """
+    """
+    all_tokens accumulates all tokens from each iteration
+    Add all tokens from current_segments to the overall list of tokens all_tokens
+    """
+    """
+    all_tokens.extend(
+        [token for segment in current_segments for token in segment["tokens"]]
+    )
+    """
+    """
+    Where to use the prompts at
+    """
+    """
+    if not condition_on_previous_text or result.temperature > 0.5:
+        # do not feed the prompt tokens if a high temperature was used
+        prompt_reset_since = len(all_tokens)
+    """
+    # update progress bar
+    # CODE CHANGE: No longer using progress bar
+    # pbar.update(min(content_frames, seek) - previous_seek)
+
+
+
+
+
+    """
+    CODE CHANGE: CODE ADDITION
+
+    This code basically replaces the code above. However, it is put separate because
+    all our hypothesis may now start from different seek positions, depending on 
+    how their individual segments were processed earlier due to different hypothesis 
+    tokens
+
+    Still the same logic
+    """
+    # loop through seek values corresponding to hypotheses
+    # s_index will have the same range as number of hypotheses
+    for s_index in range(len(seeks)):
+        seek = seeks[s_index]
+        while seek < content_frames:
+            # GET THE NEW SEGMENT INFO
             time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
-            window_end_time = float((seek + N_FRAMES) * HOP_LENGTH / SAMPLE_RATE)
-            segment_size = min(N_FRAMES, content_frames - seek, seek_clip_end - seek)
-            mel_segment = mel[:, seek : seek + segment_size]
+            mel_segment = mel[:, seek : seek + N_FRAMES]
+            segment_size = min(N_FRAMES, content_frames - seek)
             segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
             mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
 
-            """
-            Perform decoding on the audio segment (mel segment)
-            """
             decode_options["prompt"] = all_tokens[prompt_reset_since:]
             result: DecodingResult = decode_with_fallback(mel_segment)
-            tokens = torch.tensor(result.tokens)
+            hypothesis = result.tokens[s_index] # get corresponding hypothesis
+            hypothesis = torch.tensor(hypothesis)
 
-            """
-            First check if we should skip based on the no speech probability and 
-            no speech threshold
+            current_segments = []
 
-            Have a second check on the average log probability of the decoded tokens
-            to see if the model is confident in its output
-
-            If we relly should skip, increment seek by the size of the segment
-            and skip the code below
-            """
             if no_speech_threshold is not None:
                 # no voice activity check
                 should_skip = result.no_speech_prob > no_speech_threshold
@@ -444,113 +1022,21 @@ def transcribe(
                     seek += segment_size  # fast-forward to the next segment boundary
                     continue
 
-            """
-            Store the current seek position
-            Initialise a list to store the segments generated in this iteration
-            """
-            previous_seek = seek
-            current_segments = []
-
-            """
-            Calculate a score to indicate how anomalous a word is
-
-            Determines whether a segment is considered anomalous based on the anomaly scores of its words.
-
-            Finds the next segment in a list of segment dictionaries that contains something in the words key
-            """
-            # anomalous words are very long/short/improbable
-            def word_anomaly_score(word: dict) -> float:
-                probability = word.get("probability", 0.0)
-                duration = word["end"] - word["start"]
-                score = 0.0
-                if probability < 0.15:
-                    score += 1.0
-                if duration < 0.133:
-                    score += (0.133 - duration) * 15
-                if duration > 2.0:
-                    score += duration - 2.0
-                return score
-
-            def is_segment_anomaly(segment: Optional[dict]) -> bool:
-                if segment is None or not segment["words"]:
-                    return False
-                words = [w for w in segment["words"] if w["word"] not in punctuation]
-                words = words[:8]
-                score = sum(word_anomaly_score(w) for w in words)
-                return score >= 3 or score + 0.01 >= len(words)
-
-            def next_words_segment(segments: List[dict]) -> Optional[dict]:
-                return next((s for s in segments if s["words"]), None)
-
-
-            """
-            timestamp_tokens: Boolean tensor indicating
-            which tokens in the token tensor are timestamp tokens
-            - Note: .ge is greater than or equal
-
-            single_timestamp_ending: Check if the token sequence ends with 
-            a single timestamp token
-
-            consecutive: Identify the indices in tokens tensor
-            where two timestamp tokens occur consecutively
-            - Add 1 to refer to the second token in each pair of consecutive timestamp tokens
-            
-            consecutive timestamp tokens: 
-            - can indicate silence, pause or non-speech
-            - can signal the end of one speech segment and the beginning of another
-            """
-            timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
+            timestamp_tokens: torch.Tensor = hypothesis.ge(tokenizer.timestamp_begin)
             single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
 
             consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
             consecutive.add_(1)
-
-
-            """
-            Some tokens are timestamp tokens, used to represent specific points in time in
-            the audio
-
-            Each timestamp token represents a time increment
-
-            When the token sequence generated contains consecutive timestamp tokens
-
-            First create a list of indicies that will be used to segment the token 
-            sequence at positions where the consecutive timestamp tokens occur. Call it
-            slices (slicing the token sequence)
-
-            If the token sequence ends with a single timestamp token, append
-            the length of tokens to slices i.e. last index of the 
-            token sequence
-
-            Initialise the last_slice to be 0: Used as the starting index
-            for slicing the token sequence
-            """
+           
             if len(consecutive) > 0:
                 # if the output contains two consecutive timestamp tokens
                 slices = consecutive.tolist()
                 if single_timestamp_ending:
-                    slices.append(len(tokens))
+                    slices.append(len(hypothesis))
 
                 last_slice = 0
-                """
-                For each slice index,
-                    Extract the tokens between last_slice and current slice
-
-                    start_timestamp_pos: Position of the start timestamp token. 
-                    Integer value indicating how many timestamp steps
-                    away from the beginning of the timestamp token
-
-                    end_timestamp_pos: Position of the end timestamp token. 
-                    Integer value indicating how many timestamp steps
-                    away from the beginning of the timestamp token
-
-                    use the start_timestamp_pos and end_timestamp_pos
-                    to calculate the actual times 
-
-                    We then create a new segment 
-                """
                 for current_slice in slices:
-                    sliced_tokens = tokens[last_slice:current_slice]
+                    sliced_tokens = hypothesis[last_slice:current_slice]
                     start_timestamp_pos = (
                         sliced_tokens[0].item() - tokenizer.timestamp_begin
                     )
@@ -573,15 +1059,12 @@ def transcribe(
                 else:
                     # otherwise, ignore the unfinished segment and seek to the last timestamp
                     last_timestamp_pos = (
-                        tokens[last_slice - 1].item() - tokenizer.timestamp_begin
+                        hypothesis[last_slice - 1].item() - tokenizer.timestamp_begin
                     )
                     seek += last_timestamp_pos * input_stride
-
-
-
             else:
                 duration = segment_duration
-                timestamps = tokens[timestamp_tokens.nonzero().flatten()]
+                timestamps = hypothesis[timestamp_tokens.nonzero().flatten()]
                 if (
                     len(timestamps) > 0
                     and timestamps[-1].item() != tokenizer.timestamp_begin
@@ -596,126 +1079,45 @@ def transcribe(
                     new_segment(
                         start=time_offset,
                         end=time_offset + duration,
-                        tokens=tokens,
+                        tokens=hypothesis,
                         result=result,
                     )
                 )
                 seek += segment_size
 
-            if word_timestamps:
-                add_word_timestamps(
-                    segments=current_segments,
-                    model=model,
-                    tokenizer=tokenizer,
-                    mel=mel_segment,
-                    num_frames=segment_size,
-                    prepend_punctuations=prepend_punctuations,
-                    append_punctuations=append_punctuations,
-                    last_speech_timestamp=last_speech_timestamp,
-                )
-
-                if not single_timestamp_ending:
-                    last_word_end = get_end(current_segments)
-                    if last_word_end is not None and last_word_end > time_offset:
-                        seek = round(last_word_end * FRAMES_PER_SECOND)
-
-                # skip silence before possible hallucinations
-                if hallucination_silence_threshold is not None:
-                    threshold = hallucination_silence_threshold
-                    if not single_timestamp_ending:
-                        last_word_end = get_end(current_segments)
-                        if last_word_end is not None and last_word_end > time_offset:
-                            remaining_duration = window_end_time - last_word_end
-                            if remaining_duration > threshold:
-                                seek = round(last_word_end * FRAMES_PER_SECOND)
-                            else:
-                                seek = previous_seek + segment_size
-
-                    # if first segment might be a hallucination, skip leading silence
-                    first_segment = next_words_segment(current_segments)
-                    if first_segment is not None and is_segment_anomaly(first_segment):
-                        gap = first_segment["start"] - time_offset
-                        if gap > threshold:
-                            seek = previous_seek + round(gap * FRAMES_PER_SECOND)
-                            continue
-
-                    # skip silence before any possible hallucination that is surrounded
-                    # by silence or more hallucinations
-                    hal_last_end = last_speech_timestamp
-                    for si in range(len(current_segments)):
-                        segment = current_segments[si]
-                        if not segment["words"]:
-                            continue
-                        if is_segment_anomaly(segment):
-                            next_segment = next_words_segment(
-                                current_segments[si + 1 :]
-                            )
-                            if next_segment is not None:
-                                hal_next_start = next_segment["words"][0]["start"]
-                            else:
-                                hal_next_start = time_offset + segment_duration
-                            silence_before = (
-                                segment["start"] - hal_last_end > threshold
-                                or segment["start"] < threshold
-                                or segment["start"] - time_offset < 2.0
-                            )
-                            silence_after = (
-                                hal_next_start - segment["end"] > threshold
-                                or is_segment_anomaly(next_segment)
-                                or window_end_time - segment["end"] < 2.0
-                            )
-                            if silence_before and silence_after:
-                                seek = round(
-                                    max(time_offset + 1, segment["start"])
-                                    * FRAMES_PER_SECOND
-                                )
-                                if content_duration - segment["end"] < threshold:
-                                    seek = content_frames
-                                current_segments[si:] = []
-                                break
-                        hal_last_end = segment["end"]
-
-                last_word_end = get_end(current_segments)
-                if last_word_end is not None:
-                    last_speech_timestamp = last_word_end
-
-            if verbose:
-                for segment in current_segments:
-                    start, end, text = segment["start"], segment["end"], segment["text"]
-                    line = f"[{format_timestamp(start)} --> {format_timestamp(end)}] {text}"
-                    print(make_safe(line))
-
             # if a segment is instantaneous or does not contain text, clear it
-            for i, segment in enumerate(current_segments):
+            for segments in current_segments:
                 if segment["start"] == segment["end"] or segment["text"].strip() == "":
                     segment["text"] = ""
                     segment["tokens"] = []
                     segment["words"] = []
+        
+            current_segments_list[s_index].extend([current_segments])
+            current_tokens_list[s_index].extend([token for segment in current_segments for token in segment["tokens"]])
 
-            all_segments.extend(
-                [
-                    {"id": i, **segment}
-                    for i, segment in enumerate(
-                        current_segments, start=len(all_segments)
-                    )
-                ]
-            )
-            all_tokens.extend(
-                [token for segment in current_segments for token in segment["tokens"]]
-            )
 
-            if not condition_on_previous_text or result.temperature > 0.5:
-                # do not feed the prompt tokens if a high temperature was used
-                prompt_reset_since = len(all_tokens)
 
-            # update progress bar
-            pbar.update(min(content_frames, seek) - previous_seek)
 
+
+    """
+    Return the transcripted text, all the segment information etc.
+    """
+    """
+    CODE CHANGE: We now return a different format
     return dict(
         text=tokenizer.decode(all_tokens[len(initial_prompt_tokens) :]),
         segments=all_segments,
         language=language,
     )
+    """
+
+    # loop through each hypothesis
+    out_dicts = []
+    for all_toks, segs in zip(current_tokens_list, current_segments_list):
+        segs_list = [segment for sublist in segs for segment in sublist]
+        out_dicts.append(dict(text=tokenizer.decode(all_toks[len(initial_prompt_tokens) :]), segments=segs_list, language=language))
+
+    return out_dicts
 
 
 def cli():
