@@ -40,7 +40,7 @@ def transcribe(
     audio: Union[str, np.ndarray, torch.Tensor],
     *,
     verbose: Optional[bool] = None,
-    temperature: Union[float, Tuple[float, ...]] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    temperature: Union[float, Tuple[float, ...]] = (0.0), # (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
     compression_ratio_threshold: Optional[float] = 2.4,
     logprob_threshold: Optional[float] = -1.0,
     no_speech_threshold: Optional[float] = 0.6,

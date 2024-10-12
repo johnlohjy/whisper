@@ -36,7 +36,8 @@ if TYPE_CHECKING:
 
 def custom_audio_embedding(
     model: "Whisper",
-    audio: Union[str, np.ndarray, torch.Tensor]
+    audio: Union[str, np.ndarray, torch.Tensor],
+    **decode_options,
 ):
     """
     Get the embeddings of an audio file using Whisper
@@ -58,5 +59,18 @@ def custom_audio_embedding(
     """
     Convert audio into log-mel spectrogram, an input format suitable for Whisper
     """
+
+    dtype = torch.float16 if decode_options.get("fp16", True) else torch.float32
+    if model.device == torch.device("cpu"):
+        if torch.cuda.is_available():
+            warnings.warn("Performing inference on CPU when CUDA is available")
+        if dtype == torch.float16:
+            warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+            dtype = torch.float32
+
+    if dtype == torch.float32:
+        decode_options["fp16"] = False
+
+
     mel = log_mel_spectrogram(audio, model.dims.n_mels)
     return model.embed_audio(mel)

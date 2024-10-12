@@ -109,8 +109,8 @@ class DecodingOptions:
     temperature: float = 0.0
     sample_len: Optional[int] = None  # maximum number of tokens to sample
     best_of: Optional[int] = None  # number of independent sample trajectories, if t > 0
-    # CODE CHANGE: Set beam_size to 50 by default to output N-best transcription instead of None
-    beam_size: Optional[int] = 50  # number of beams in beam search, if t == 0
+    # CODE CHANGE
+    beam_size: Optional[int] = None  # number of beams in beam search, if t == 0
     patience: Optional[float] = None  # patience in beam search (arxiv:2204.05424)
 
     # "alpha" in Google NMT, or None for length norm, when ranking generations
