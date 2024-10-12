@@ -487,7 +487,7 @@ def transcribe(
     tokens = torch.tensor(result.tokens)
     """
     # CODE CHANGE: Change result type returned from decoding.py
-    # Decode the current segment
+    # Decode the current segment, decode the very first mel segment into a transcription
     result: DecodingResult = decode_with_fallback(mel_segment) # calls on a segment (computational requirements)
     # Recall: Seek is the frame index of the clip we are processing
     # CODE CHANGE: Maintain a different seek position for each hypotheses
@@ -1005,7 +1005,7 @@ def transcribe(
             mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
 
             decode_options["prompt"] = all_tokens[prompt_reset_since:]
-            result: DecodingResult = decode_with_fallback(mel_segment)
+            result: DecodingResult = decode_with_fallback(mel_segment) # Decode the new mel segment based on the curr seek position of the hypothesis
             hypothesis = result.tokens[s_index] # get corresponding hypothesis
             hypothesis = torch.tensor(hypothesis)
 
