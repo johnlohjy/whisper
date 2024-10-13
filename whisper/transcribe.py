@@ -213,8 +213,6 @@ def transcribe(
 
         return decode_result
 
-
-    seek = 0 
     input_stride = exact_div(
         N_FRAMES, model.dims.n_audio_ctx
     )  
@@ -250,138 +248,145 @@ def transcribe(
         }
 
 
-    time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
-    segment_size = min(N_FRAMES, content_frames - seek)
-    mel_segment = mel[:, seek : seek + segment_size]
-    segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
-    mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
-
-    decode_options["prompt"] = all_tokens[prompt_reset_since:]
-    
-    result: DecodingResult = decode_with_fallback(mel_segment) 
-
     seeks = [0]*decode_options["beam_size"] 
 
+    speech_not_present = True
 
-    if no_speech_threshold is not None:
-        should_skip = result.no_speech_prob > no_speech_threshold
-        if (
-            logprob_threshold is not None
-            and result.avg_logprob > logprob_threshold
-        ):
-            should_skip = False
+    while speech_not_present:
+        time_offset = float(seeks[0] * HOP_LENGTH / SAMPLE_RATE)
+        segment_size = min(N_FRAMES, content_frames - seeks[0])
+        mel_segment = mel[:, seeks[0] : seeks[0] + segment_size]
+        segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
+        mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
 
-        if should_skip:
-            seeks = [seek + segment_size for seek in seeks]  
+        decode_options["prompt"] = all_tokens[prompt_reset_since:]
+        
+        result: DecodingResult = decode_with_fallback(mel_segment) 
 
-    
-    current_segments_list = [] 
-    current_tokens_list = [] 
+        if no_speech_threshold is not None:
+            should_skip = result.no_speech_prob > no_speech_threshold
+            if (
+                logprob_threshold is not None
+                and result.avg_logprob > logprob_threshold
+            ):
+                should_skip = False
 
-    for j in range(len(result.tokens)):
-        current_segments = []
-        hypothesis = torch.tensor(result.tokens[j])
+            if should_skip:
+                seeks = [seek + segment_size for seek in seeks]  
+                continue
 
-        timestamp_tokens: torch.Tensor = hypothesis.ge(tokenizer.timestamp_begin)
-        single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
+        speech_not_present = False
+        
+        current_segments_list = [] 
+        current_tokens_list = [] 
 
-        consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
-        consecutive.add_(1)
+        for j in range(len(result.tokens)):
+            current_segments = []
+            hypothesis = torch.tensor(result.tokens[j])
+
+            timestamp_tokens: torch.Tensor = hypothesis.ge(tokenizer.timestamp_begin)
+            single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
+
+            consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
+            consecutive.add_(1)
 
 
-        if len(consecutive) > 0:
-            slices = consecutive.tolist()
-            if single_timestamp_ending:
-                slices.append(len(hypothesis))
+            if len(consecutive) > 0:
+                slices = consecutive.tolist()
+                if single_timestamp_ending:
+                    slices.append(len(hypothesis))
 
-            last_slice = 0
-            for current_slice in slices:
-                sliced_tokens = hypothesis[last_slice:current_slice]
-                start_timestamp_pos = (
-                    sliced_tokens[0].item() - tokenizer.timestamp_begin
-                )
-                end_timestamp_pos = min(
-                        sliced_tokens[-1].item() - tokenizer.timestamp_begin,
-                        np.ceil((content_frames - seeks[j]) / input_stride) - 1
+                last_slice = 0
+                for current_slice in slices:
+                    sliced_tokens = hypothesis[last_slice:current_slice]
+                    start_timestamp_pos = (
+                        sliced_tokens[0].item() - tokenizer.timestamp_begin
                     )
-                encoder_embeddings = result.encoder_embeddings[:, :, start_timestamp_pos:int(end_timestamp_pos)]
+                    end_timestamp_pos = min(
+                            sliced_tokens[-1].item() - tokenizer.timestamp_begin,
+                            np.ceil((content_frames - seeks[j]) / input_stride) - 1
+                        )
+                    encoder_embeddings = result.encoder_embeddings[:, :, start_timestamp_pos:int(end_timestamp_pos)]
+                    current_segments.append(
+                        new_segment(
+                            start=time_offset + start_timestamp_pos * time_precision,
+                            end=time_offset + end_timestamp_pos * time_precision,
+                            tokens=sliced_tokens,
+                            result=result,
+                            encoder_embeddings=encoder_embeddings
+                        )
+                    )
+                    last_slice = current_slice
+
+            
+                if single_timestamp_ending:
+                    seeks[j]+=segment_size
+                else:
+                    last_timestamp_pos = (
+                        hypothesis[last_slice - 1].item() - tokenizer.timestamp_begin
+                    )
+                    seeks[j] += last_timestamp_pos * input_stride
+
+            else:
+                duration = segment_duration
+                timestamps = hypothesis[timestamp_tokens.nonzero().flatten()]
+                if (
+                    len(timestamps) > 0
+                    and timestamps[-1].item() != tokenizer.timestamp_begin
+                ):
+                    last_timestamp_pos = min(
+                            timestamps[-1].item() - tokenizer.timestamp_begin,
+                            np.ceil((content_frames - seeks[j]) / input_stride) - 1 # assume each stride step as one timestamp as an upperbound
+                        )
+                    duration = last_timestamp_pos * time_precision
+
+                    start_timestamp_pos = (
+                                timestamps[0].item() - tokenizer.timestamp_begin
+                        )
+
+                    encoder_embeddings = result.encoder_embeddings[:, :,
+                                            start_timestamp_pos:int(last_timestamp_pos)]
+                else: 
+                    end_position = np.ceil((content_frames - seeks[j]) / input_stride) - 1
+                    duration = end_position * time_precision
+
+                    start_timestamp_pos = (
+                            timestamps[0].item() - tokenizer.timestamp_begin
+                    )
+                    encoder_embeddings = result.encoder_embeddings[:, :,
+                                        start_timestamp_pos:int(end_position)]
+
+
                 current_segments.append(
                     new_segment(
-                        start=time_offset + start_timestamp_pos * time_precision,
-                        end=time_offset + end_timestamp_pos * time_precision,
-                        tokens=sliced_tokens,
+                        start=time_offset,
+                        end=time_offset + duration,
+                        tokens = hypothesis,
                         result=result,
                         encoder_embeddings=encoder_embeddings
                     )
                 )
-                last_slice = current_slice
-
-        
-            if single_timestamp_ending:
                 seeks[j]+=segment_size
-            else:
-                last_timestamp_pos = (
-                    hypothesis[last_slice - 1].item() - tokenizer.timestamp_begin
-                )
-                seeks[j] += last_timestamp_pos * input_stride
 
-        else:
-            duration = segment_duration
-            timestamps = hypothesis[timestamp_tokens.nonzero().flatten()]
-            if (
-                len(timestamps) > 0
-                and timestamps[-1].item() != tokenizer.timestamp_begin
-            ):
-                last_timestamp_pos = min(
-                        timestamps[-1].item() - tokenizer.timestamp_begin,
-                        np.ceil((content_frames - seeks[j]) / input_stride) - 1 # assume each stride step as one timestamp as an upperbound
-                    )
-                duration = last_timestamp_pos * time_precision
+            try:
+                current_segments_list[j].extend([current_segments])
+            except IndexError:
+                current_segments_list.append([current_segments])
 
-                start_timestamp_pos = (
-                            timestamps[0].item() - tokenizer.timestamp_begin
-                    )
+            for segments in current_segments_list[j]:
+                for segment in segments:
+                    if segment["start"] == segment["end"] or segment["text"].strip() == "":
+                        segment["text"] = ""
+                        segment["tokens"] = []
+                        segment["words"] = []
 
-                encoder_embeddings = result.encoder_embeddings[:, :,
-                                        start_timestamp_pos:int(last_timestamp_pos)]
-            else: 
-                end_position = np.ceil((content_frames - seeks[j]) / input_stride) - 1
-                duration = end_position * time_precision
-
-                start_timestamp_pos = (
-                        timestamps[0].item() - tokenizer.timestamp_begin
-                )
-                encoder_embeddings = result.encoder_embeddings[:, :,
-                                    start_timestamp_pos:int(end_position)]
+            try:
+                current_tokens_list[j].extend([token for segment in current_segments for token in segment["tokens"]])
+            except IndexError:
+                current_tokens_list.append([token for segment in current_segments for token in segment["tokens"]])
 
 
-            current_segments.append(
-                new_segment(
-                    start=time_offset,
-                    end=time_offset + duration,
-                    tokens = hypothesis,
-                    result=result,
-                    encoder_embeddings=encoder_embeddings
-                )
-            )
-            seeks[j]+=segment_size
 
-        try:
-            current_segments_list[j].extend([current_segments])
-        except IndexError:
-            current_segments_list.append([current_segments])
-
-        for segments in current_segments_list[j]:
-            for segment in segments:
-                if segment["start"] == segment["end"] or segment["text"].strip() == "":
-                    segment["text"] = ""
-                    segment["tokens"] = []
-                    segment["words"] = []
-
-        try:
-            current_tokens_list[j].extend([token for segment in current_segments for token in segment["tokens"]])
-        except IndexError:
-            current_tokens_list.append([token for segment in current_segments for token in segment["tokens"]])
 
     for s_index in range(len(seeks)):
         seek = seeks[s_index]
