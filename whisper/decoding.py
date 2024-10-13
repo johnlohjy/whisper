@@ -95,6 +95,7 @@ class CustomDecodingResult:
     no_speech_prob: float = np.nan
     temperature: float = np.nan
     compression_ratio: float = np.nan # use just the best hypothesis for this value
+    encoder_embeddings: np.ndarray 
 ##############################################
 
 @dataclass(frozen=True)
@@ -709,7 +710,7 @@ class DecodingTask:
 
         return tuple(sorted(set(suppress_tokens)))
 
-    def _get_audio_features(self, mel: Tensor):
+    def _get_audio_features(self, mel: Tensor, include_embeddings: bool = False): # CODE CHANGE: Include the option to get embeddings
         if self.options.fp16:
             mel = mel.half()
 
@@ -720,7 +721,16 @@ class DecodingTask:
             # encoded audio features are given; skip audio encoding
             audio_features = mel
         else:
-            audio_features = self.model.encoder(mel)
+            # CODE CHANGE: Include the option to get embeddings
+            # Original Code
+            # audio_features = self.model.encoder(mel) 
+            # CODE ADDITIONS
+            result = self.model.encoder(mel, include_embeddings)
+            if include_embeddings:
+                audio_features, embeddings = result
+            else:
+                audio_features = result
+            ###
 
         if audio_features.dtype != (
             torch.float16 if self.options.fp16 else torch.float32
@@ -729,7 +739,12 @@ class DecodingTask:
                 f"audio_features has an incorrect dtype: {audio_features.dtype}"
             )
 
-        return audio_features
+        # CODE CHANGE
+        # return audio_features
+        if include_embeddings:
+            return audio_features, embeddings
+        else:
+            return audio_features
 
     def _detect_language(self, audio_features: Tensor, tokens: Tensor):
         languages = [self.options.language] * audio_features.shape[0]
@@ -783,7 +798,11 @@ class DecodingTask:
         tokenizer: Tokenizer = self.tokenizer
         n_audio: int = mel.shape[0]
 
-        audio_features: Tensor = self._get_audio_features(mel)  # encoder forward pass
+        # CODE CHANGE: include embeddings
+        # audio_features: Tensor = self._get_audio_features(mel)  # encoder forward pass
+        forward_pass: Tuple[Tensor, np.ndarray] = self._get_audio_features(mel, include_embeddings=True)
+        audio_features, encoder_embeddings = forward_pass
+
         tokens: Tensor = torch.tensor([self.initial_tokens]).repeat(n_audio, 1)
 
         # detect language if requested, overwriting the language token
@@ -895,7 +914,8 @@ class DecodingTask:
                 avg_logprob=avg_logprobs[0],
                 no_speech_prob=no_speech_probs[0],
                 temperature=self.options.temperature,
-                compression_ratio=compression_ratio(texts[0]))
+                compression_ratio=compression_ratio(texts[0]),
+                encoder_embeddings=encoder_embeddings)
 
         return [decoding_result]
         ################################

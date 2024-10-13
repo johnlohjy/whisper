@@ -156,10 +156,14 @@ class AudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-    def forward(self, x: Tensor):
+    # CODE CHANGE: include the option to include embeddings
+    def forward(self, x: Tensor, include_embeddings: bool = False): 
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
+
+        include_embeddings: bool
+            whether to include intermediate steps in the output
         """
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
@@ -168,11 +172,25 @@ class AudioEncoder(nn.Module):
         assert x.shape[1:] == self.positional_embedding.shape, "incorrect audio shape"
         x = (x + self.positional_embedding).to(x.dtype)
 
+        # CODE ADDITION
+        if include_embeddings:
+            embeddings = [x.cpu().detach().numpy()]
+
         for block in self.blocks:
             x = block(x)
+            # CODE ADDITION
+            if include_embeddings:
+                embeddings.append(x.cpu().detach().numpy())
 
         x = self.ln_post(x)
-        return x
+
+        # CODE CHANGE
+        # return x
+        if include_embeddings:
+            embeddings = np.stack(embeddings, axis=1)
+            return x, embeddings
+        else:
+            return x
 
 
 class TextDecoder(nn.Module):
@@ -314,5 +332,3 @@ class Whisper(nn.Module):
     detect_language = detect_language_function
     transcribe = transcribe_function
     decode = decode_function
-    # CODE CHANGE: Add custom audio embedding function to the model's methods
-    custom_audio_embedding = custom_audio_embedding_function
