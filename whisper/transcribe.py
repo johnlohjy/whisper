@@ -230,12 +230,11 @@ def transcribe(
 
 
     def new_segment(
-        *, start: float, end: float, tokens: torch.Tensor, result: CustomDecodingResult, encoder_embeddings # CODE CHANGE
+        *, start: float, end: float, tokens: torch.Tensor, result: CustomDecodingResult, encoder_embeddings 
     ):
         tokens = tokens.tolist()
         text_tokens = [token for token in tokens if token < tokenizer.eot]
         return {
-            "seek": seek,
             "start": start,
             "end": end,
             "text": tokenizer.decode(text_tokens),
