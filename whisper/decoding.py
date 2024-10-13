@@ -87,6 +87,7 @@ Store relevant data for the decoding result
 class CustomDecodingResult:
     """All hypotheses from beam search"""
     audio_features: Tensor
+    encoder_embeddings: np.ndarray 
     language: str
     language_probs: Optional[Dict[str, float]] = None
     tokens: List[List[int]] = field(default_factory=list) # List of lists where each sublist contains the token IDs of a hypotheses
@@ -95,7 +96,6 @@ class CustomDecodingResult:
     no_speech_prob: float = np.nan
     temperature: float = np.nan
     compression_ratio: float = np.nan # use just the best hypothesis for this value
-    encoder_embeddings: np.ndarray 
 ##############################################
 
 @dataclass(frozen=True)
