@@ -11,8 +11,6 @@ from torch import Tensor, nn
 from .decoding import decode as decode_function
 from .decoding import detect_language as detect_language_function
 from .transcribe import transcribe as transcribe_function
-# CODE CHANGE: Import custom audio embedding function
-from .custom_audio_embedding import custom_audio_embedding as custom_audio_embedding_function
 
 
 @dataclass
